@@ -31,6 +31,17 @@ WURZELN = {
     "appdata": (os.environ.get("APPDATA_PFAD", "/appdata"), True),
     "vorlagen": (os.environ.get("VORLAGEN_PFAD", "/vorlagen"), False),
 }
+def _liste(name, standard):
+    return {x.strip().strip("/") for x in os.environ.get(name, standard).split(",") if x.strip()}
+
+
+# Ordner direkt unter appdata: SCHREIBEN = nur diese dürfen geändert werden, GESPERRT = weder lesen noch schreiben
+SCHREIBEN = _liste("SCHREIBEN_ERLAUBT", "filen-webdav")
+GESPERRT = _liste("GESPERRT", "kassensturz,stichtag")
+# Dateien mit Zugangsdaten, die nie gelesen oder geschrieben werden (auch nicht maskiert)
+GEHEIME_DATEI = re.compile(r"(^\.env$|^rclone\.conf$|\.(key|pem|p12|pfx|kdbx)$|^secrets?\b|^id_(rsa|ed25519))", re.IGNORECASE)
+# Container, die dieser Server nie stoppt
+GESCHUETZT = _liste("GESCHUETZT", "unraid-mcp,unraid-mcp-docker")
 GEHEIM = re.compile(r"(pass|token|secret|key|pwd|credential)", re.IGNORECASE)
 MASKE = "***"
 
@@ -102,6 +113,16 @@ def aufloesen(pfad, schreiben=False):
     ziel = os.path.realpath(os.path.join(basis, teile[1] if len(teile) > 1 else ""))
     if ziel != basis and not ziel.startswith(basis + os.sep):
         raise Fehler("Pfad liegt außerhalb der Freigabe")
+    if teile[0] == "appdata":
+        rel = os.path.relpath(ziel, basis)
+        oben = "" if rel == "." else rel.split(os.sep)[0]
+        if oben in GESPERRT:
+            raise Fehler(f"„appdata/{oben}“ ist gesperrt")
+        if schreiben and oben not in SCHREIBEN:
+            erlaubt = ", ".join(sorted(SCHREIBEN)) or "keine"
+            raise Fehler(f"Schreiben nur unter appdata/{{{erlaubt}}} erlaubt")
+    if GEHEIME_DATEI.search(os.path.basename(ziel)):
+        raise Fehler("Datei enthält Zugangsdaten und ist gesperrt")
     return ziel
 
 
@@ -111,7 +132,8 @@ mcp = MCPServer(
     version=VERSION,
     instructions=(
         "Zugriff auf den Unraid-Server: Docker-Container auflisten, Protokolle lesen, starten/stoppen/neu starten, "
-        "Einstellungen ansehen und Dateien unter appdata lesen und ändern (vorlagen = Unraid-Container-Vorlagen, nur lesen). "
+        "Einstellungen ansehen und Dateien unter appdata lesen; ändern nur in den freigegebenen Ordnern, gesperrte Ordner und "
+        "Dateien mit Zugangsdaten (rclone.conf, .env, Schlüssel) sind nicht erreichbar (vorlagen = Unraid-Vorlagen, nur lesen). "
         "Geheimnisse (Passwörter, Tokens, Schlüssel) erscheinen als ***; beim Schreiben einer JSON-Datei bleibt ein *** "
         "der alte Wert. Vor dem Schreiben wird eine .bak-Kopie angelegt. Nach Änderungen an Einstellungen den Container "
         "neu starten."
@@ -195,8 +217,8 @@ def container_aktion(name: str, aktion: str) -> str:
     """Container steuern: aktion = start, stop oder restart."""
     if aktion not in ("start", "stop", "restart"):
         raise Fehler("aktion muss start, stop oder restart sein")
-    if name == os.environ.get("HOSTNAME_SELBST", "unraid-mcp") and aktion == "stop":
-        raise Fehler("Dieser MCP-Server stoppt sich nicht selbst")
+    if name in GESCHUETZT and aktion == "stop":
+        raise Fehler(f"„{name}“ gehört zu diesem MCP-Server und wird nicht gestoppt")
     c = container(name)
     getattr(c, aktion)(timeout=30) if aktion != "start" else c.start()
     c.reload()
@@ -259,16 +281,19 @@ def ordner_inhalt(pfad: str = "appdata", tiefe: int = 1) -> str:
         if ebene >= tiefe:
             ordner[:] = []
             continue
+        if ebene == 0 and os.path.realpath(wurzel) == os.path.realpath(WURZELN["appdata"][0]):
+            ordner[:] = [o for o in ordner if o not in GESPERRT]
         ordner.sort()
-        einr = "  " * ebene
+        rel = os.path.relpath(wurzel, basis)
+        vor = "" if rel == "." else rel + "/"
         for o in ordner:
-            zeilen.append(f"{einr}{o}/")
+            zeilen.append(f"{vor}{o}/")
         for d in sorted(dateien):
             try:
                 st = os.stat(os.path.join(wurzel, d))
-                zeilen.append(f"{einr}{d}  {st.st_size} B  {dt.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M}")
+                zeilen.append(f"{vor}{d}  {st.st_size} B  {dt.datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M}")
             except OSError:
-                zeilen.append(f"{einr}{d}  (nicht lesbar)")
+                zeilen.append(f"{vor}{d}  (nicht lesbar)")
         if len(zeilen) > 2000:
             zeilen.append("… (gekürzt)")
             break
@@ -294,7 +319,7 @@ def datei_lesen(pfad: str) -> str:
 
 @werkzeug
 def datei_schreiben(pfad: str, inhalt: str) -> str:
-    """Textdatei unter appdata schreiben (neu oder ersetzen). Vorher entsteht eine Kopie <datei>.<zeit>.bak.
+    """Textdatei in einem freigegebenen Ordner unter appdata schreiben (neu oder ersetzen). Vorher entsteht eine Kopie <datei>.<zeit>.bak.
     In JSON-Dateien wird *** durch den bisherigen geheimen Wert ersetzt. Ungültiges JSON wird abgelehnt."""
     ziel = aufloesen(pfad, schreiben=True)
     if os.path.isdir(ziel):

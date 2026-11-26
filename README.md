@@ -12,34 +12,44 @@ eigener Connector in Claude. Läuft als Docker-Container auf Unraid.
 | `container_statistik` | CPU und RAM der laufenden Container |
 | `system_status` | Laufzeit, Last, RAM, Docker-Übersicht, Platz |
 | `ordner_inhalt` | Dateien unter `appdata` bzw. `vorlagen` |
-| `datei_lesen` / `datei_schreiben` | Textdateien unter `appdata` (schreiben) und `vorlagen` (nur lesen) |
+| `datei_lesen` / `datei_schreiben` | Textdateien unter `appdata` (schreiben nur in freigegebenen Ordnern) und `vorlagen` (nur lesen) |
 
 Keine freie Shell. Pfade beginnen mit der Wurzel: `appdata/filen-webdav/data/options.json`.
 
-**Geheimnisse:** In `container_details` und beim Lesen von JSON-Dateien erscheinen Werte, deren Schlüssel nach
-Passwort, Token, Key oder Secret klingt, als `***`. Wird eine JSON-Datei mit `***` zurückgeschrieben, bleibt der
-alte Wert erhalten. Vor jedem Schreiben entsteht eine Kopie `<datei>.<JJJJMMTT-hhmmss>.bak`.
+## Schutzschichten
 
-> Der Container bekommt den Docker-Socket und damit volle Kontrolle über Docker auf dem Host. Den Token wie ein
-> Root-Passwort behandeln.
+| Schicht | Wirkung |
+|---|---|
+| Bearer-Token | ohne `Authorization: Bearer <MCP_TOKEN>` antwortet der Server mit 401 (offen ist nur `/gesund`) |
+| Socket-Proxy | der MCP-Server sieht den Docker-Socket nicht selbst; der Proxy erlaubt nur Container ansehen, Protokolle, Statistik, starten, stoppen, neu starten – kein Anlegen, kein `exec`, keine Images oder Volumes |
+| Schreib-Freigabe | schreiben nur in den Ordnern aus `SCHREIBEN_ERLAUBT` (Standard: `filen-webdav`) |
+| Sperre | Ordner aus `GESPERRT` (Standard: `kassensturz,stichtag`) sind weder lesbar noch sichtbar |
+| Zugangsdaten-Dateien | `rclone.conf`, `.env`, `*.key`, `*.pem`, `secrets*` u. Ä. sind nie lesbar oder schreibbar |
+| Maskierung | in `container_details` und JSON-Dateien erscheinen Passwörter, Tokens und Schlüssel als `***`; beim Zurückschreiben bleibt der alte Wert |
+| Kopie | vor jedem Schreiben entsteht `<datei>.<JJJJMMTT-hhmmss>.bak` |
+
+Der Token bleibt trotzdem der Schlüssel zu allen Containern: nur in Unraid und im Connector hinterlegen, bei Verdacht
+neu erzeugen.
 
 ## Einrichten auf Unraid
 
-1. Token erzeugen (Unraid-Terminal): `openssl rand -hex 32`
-2. Container anlegen – entweder die Vorlage `unraid/unraid-mcp.xml` nach
-   `/boot/config/plugins/dockerMan/templates-user/my-unraid-mcp.xml` kopieren und unter *Docker → Add Container*
-   auswählen, oder von Hand:
+Mit dem Plugin **Docker Compose Manager** (Community Apps):
 
-   | Feld | Wert |
-   |---|---|
-   | Repository | `ghcr.io/uekala/unraid-mcp:latest` |
-   | Port | `8765` → `8765` |
-   | Variable `MCP_TOKEN` | Token aus Schritt 1 |
-   | Pfad | `/var/run/docker.sock` → `/var/run/docker.sock` |
-   | Pfad | `/mnt/user/appdata` → `/appdata` (lesen/schreiben) |
-   | Pfad | `/boot/config/plugins/dockerMan/templates-user` → `/vorlagen` (nur lesen) |
+1. Im Unraid-Terminal:
 
-3. Prüfen: `curl http://<Unraid-IP>:8765/gesund` → `ok 0.1.0`
+   ```bash
+   mkdir -p /mnt/user/appdata/unraid-mcp && cd /mnt/user/appdata/unraid-mcp
+   wget -q https://raw.githubusercontent.com/uekala/unraid-mcp/main/deploy/docker-compose.yml
+   echo "MCP_TOKEN=$(openssl rand -hex 32)" > .env && chmod 600 .env
+   cat .env      # Token für den Connector notieren
+   ```
+
+2. *Docker → Compose → Add New Stack*, Name `unraid-mcp`, als Ordner `/mnt/user/appdata/unraid-mcp` wählen
+   (oder im Terminal `docker compose up -d` in diesem Ordner).
+3. Prüfen: `curl http://localhost:8765/gesund` → `ok 0.2.0`
+
+Weitere Ordner zum Schreiben freigeben: `SCHREIBEN_ERLAUBT` in der Compose-Datei ergänzen (kommagetrennt, z. B.
+`filen-webdav,ladecockpit`) und den Stack neu starten.
 
 ## Von außen erreichbar machen (Tailscale Funnel)
 
@@ -68,5 +78,8 @@ Funnel muss in den Tailscale-Zugriffsregeln (`nodeAttrs`, Attribut `funnel`) fü
 |---|---|---|
 | `MCP_TOKEN` | Bearer-Token, mindestens 32 Zeichen | – (Pflicht) |
 | `PORT` | Port im Container | `8765` |
+| `DOCKER_HOST` | Adresse des Socket-Proxys | `tcp://unraid-mcp-docker:2375` (Compose) |
+| `SCHREIBEN_ERLAUBT` | Ordner unter appdata, die geändert werden dürfen | `filen-webdav` |
+| `GESPERRT` | Ordner unter appdata, die nicht erreichbar sind | `kassensturz,stichtag` |
 | `MAX_DATEI_KB` | größte Datei zum Lesen/Schreiben | `1024` |
 | `APPDATA_PFAD` / `VORLAGEN_PFAD` | Einhängepunkte im Container | `/appdata` / `/vorlagen` |
