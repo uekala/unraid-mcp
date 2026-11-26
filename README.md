@@ -25,7 +25,7 @@ Keine freie Shell. Pfade beginnen mit der Wurzel: `appdata/filen-webdav/data/opt
 | Schreib-Freigabe | schreiben nur in den Ordnern aus `SCHREIBEN_ERLAUBT` (Standard: `filen-webdav`) |
 | Sperre | Ordner aus `GESPERRT` (Standard: `kassensturz,stichtag`) sind weder lesbar noch sichtbar |
 | Zugangsdaten-Dateien | `rclone.conf`, `.env`, `*.key`, `*.pem`, `secrets*` u. Ä. sind nie lesbar oder schreibbar |
-| Maskierung | in `container_details` und JSON-Dateien erscheinen Passwörter, Tokens und Schlüssel als `***`; beim Zurückschreiben bleibt der alte Wert |
+| Maskierung | Passwörter, Tokens und Schlüssel erscheinen als `***`: in `container_details`, in JSON-Dateien (nach Schlüsselnamen), in `.env`-, `.conf`- und `.yaml`-Zeilen (`SCHLUESSEL=Wert`), in Unraid-Vorlagen (`Mask="true"` oder geheimer Name) und – als JWT oder `Bearer …` – überall, auch in Protokollen. Beim Zurückschreiben von JSON bleibt der alte Wert; andere Dateien mit `***` werden nicht geschrieben |
 | Kopie | vor jedem Schreiben entsteht `<datei>.<JJJJMMTT-hhmmss>.bak` |
 
 Der Token bleibt trotzdem der Schlüssel zu allen Containern: nur in Unraid und im Connector hinterlegen, bei Verdacht

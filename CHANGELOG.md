@@ -1,5 +1,11 @@
 # Änderungen
 
+## 0.2.1
+
+- Geheimnisse werden jetzt auch außerhalb von JSON maskiert: in `.env`-, `.conf`- und `.yaml`-Zeilen (z. B.
+  `ladecockpit.env`), in Unraid-Vorlagen (Werte mit `Mask="true"` oder geheimem Namen) sowie Tokens (JWT, `Bearer …`)
+  in allen Dateien, Protokollen und Container-Einstellungen. Vorher waren diese Werte über `datei_lesen` lesbar.
+
 ## 0.2.0
 
 - Docker nur noch über einen vorgeschalteten Socket-Proxy (`deploy/docker-compose.yml`): ansehen, Protokolle,

@@ -44,6 +44,14 @@ GEHEIME_DATEI = re.compile(r"(^\.env$|^rclone\.conf$|\.(key|pem|p12|pfx|kdbx)$|^
 GESCHUETZT = _liste("GESCHUETZT", "unraid-mcp,unraid-mcp-docker")
 GEHEIM = re.compile(r"(pass|token|secret|key|pwd|credential)", re.IGNORECASE)
 MASKE = "***"
+# Werte, die unabhängig vom Dateityp nie im Klartext erscheinen: JWTs (z. B. HA-Tokens) und Bearer/Basic-Angaben
+_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")
+_AUTH = re.compile(r"(\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
+# Zeilen der Form SCHLUESSEL=Wert oder schluessel: Wert (.env, .conf, .ini, .yaml)
+_ZUWEISUNG = re.compile(r"^(\s*(?:#\s*)?(?:export\s+)?[\"']?([\w.-]+)[\"']?\s*[=:]\s*)(\S.*?)\s*$")
+# Unraid-Vorlagen: <Config Name=".." Target=".." Mask="true">Wert</Config> und Elemente mit geheimem Namen
+_XML_CONFIG = re.compile(r"(<Config\b([^>]*)>)([^<]+)(</Config>)", re.IGNORECASE)
+_XML_ELEMENT = re.compile(r"(<([\w.-]+)>)([^<]+)(</\2>)")
 
 _docker = None
 
@@ -87,6 +95,36 @@ def maskiere_json(obj):
     if isinstance(obj, list):
         return [maskiere_json(v) for v in obj]
     return obj
+
+
+def _attribut(attrs, name):
+    m = re.search(rf'\b{name}="([^"]*)"', attrs, re.IGNORECASE)
+    return m.group(1) if m else ""
+
+
+def maskiere_text(text, art="text"):
+    """Geheimnisse in Text maskieren. art: "xml" (Unraid-Vorlagen), "text" (env/conf/ini/yaml) oder "frei"
+    (nur JWTs und Bearer/Basic, z. B. für Protokolle und bereits maskiertes JSON)."""
+    if art == "xml":
+        def config(m):
+            attrs = m.group(2)
+            geheim = (_attribut(attrs, "Mask").lower() == "true" or GEHEIM.search(_attribut(attrs, "Name"))
+                      or GEHEIM.search(_attribut(attrs, "Target")))
+            return m.group(1) + (MASKE if geheim and m.group(3).strip() else m.group(3)) + m.group(4)
+        text = _XML_CONFIG.sub(config, text)
+        text = _XML_ELEMENT.sub(
+            lambda m: m.group(1) + (MASKE if GEHEIM.search(m.group(2)) and m.group(3).strip() else m.group(3)) + m.group(4),
+            text)
+    elif art == "text":
+        zeilen = []
+        for z in text.split("\n"):
+            m = _ZUWEISUNG.match(z)
+            if m and GEHEIM.search(m.group(2)):
+                z = m.group(1) + MASKE
+            zeilen.append(z)
+        text = "\n".join(zeilen)
+    text = _JWT.sub(MASKE, text)
+    return _AUTH.sub(lambda m: m.group(1) + MASKE, text)
 
 
 def masken_zurueck(neu, alt):
@@ -134,8 +172,9 @@ mcp = MCPServer(
         "Zugriff auf den Unraid-Server: Docker-Container auflisten, Protokolle lesen, starten/stoppen/neu starten, "
         "Einstellungen ansehen und Dateien unter appdata lesen; ändern nur in den freigegebenen Ordnern, gesperrte Ordner und "
         "Dateien mit Zugangsdaten (rclone.conf, .env, Schlüssel) sind nicht erreichbar (vorlagen = Unraid-Vorlagen, nur lesen). "
-        "Geheimnisse (Passwörter, Tokens, Schlüssel) erscheinen als ***; beim Schreiben einer JSON-Datei bleibt ein *** "
-        "der alte Wert. Vor dem Schreiben wird eine .bak-Kopie angelegt. Nach Änderungen an Einstellungen den Container "
+        "Geheimnisse (Passwörter, Tokens, Schlüssel) erscheinen als *** – in JSON, in .env/.conf-Zeilen, in Vorlagen und in "
+        "Protokollen; beim Schreiben einer JSON-Datei bleibt ein *** der alte Wert, andere Dateien mit *** werden nicht "
+        "geschrieben. Vor dem Schreiben wird eine .bak-Kopie angelegt. Nach Änderungen an Einstellungen den Container "
         "neu starten."
     ),
 )
@@ -187,7 +226,7 @@ def container_protokoll(name: str, zeilen: int = 200, suche: str = "", seit_minu
     if suche:
         s = suche.lower()
         liste = [z for z in liste if s in z.lower()][-max(1, zeilen):]
-    return kuerzen("\n".join(liste)) or "(keine Zeilen)"
+    return kuerzen(maskiere_text("\n".join(liste), "frei")) or "(keine Zeilen)"
 
 
 @werkzeug
@@ -209,7 +248,7 @@ def container_details(name: str) -> str:
         "labels": {k: v for k, v in (a.get("Config", {}).get("Labels") or {}).items() if k.startswith(("net.unraid", "org.opencontainers.image.version"))},
         "speicher_grenze": hc.get("Memory"),
     }
-    return kuerzen(json.dumps(daten, indent=1, ensure_ascii=False, default=str))
+    return kuerzen(maskiere_text(json.dumps(daten, indent=1, ensure_ascii=False, default=str), "frei"))
 
 
 @werkzeug
@@ -302,19 +341,20 @@ def ordner_inhalt(pfad: str = "appdata", tiefe: int = 1) -> str:
 
 @werkzeug
 def datei_lesen(pfad: str) -> str:
-    """Textdatei lesen, z. B. 'appdata/filen-webdav/data/options.json'. In JSON-Dateien sind Geheimnisse als *** maskiert."""
+    """Textdatei lesen, z. B. 'appdata/filen-webdav/data/options.json'. Geheimnisse erscheinen als ***: in JSON nach
+    Schlüsselnamen, in .env/.conf/.yaml-Zeilen (SCHLUESSEL=Wert), in Unraid-Vorlagen (Mask="true") sowie Tokens überall."""
     ziel = aufloesen(pfad)
     if not os.path.isfile(ziel):
         raise Fehler("Keine Datei")
     if os.path.getsize(ziel) > MAX_LESEN:
         raise Fehler(f"Datei größer als {MAX_LESEN // 1024} KB")
     text = open(ziel, "rb").read().decode("utf-8", "replace")
-    if ziel.endswith(".json"):
+    if ziel.lower().endswith(".json"):
         try:
-            return json.dumps(maskiere_json(json.loads(text)), indent=2, ensure_ascii=False)
+            return maskiere_text(json.dumps(maskiere_json(json.loads(text)), indent=2, ensure_ascii=False), "frei")
         except ValueError:
             pass
-    return text
+    return maskiere_text(text, "xml" if ziel.lower().endswith(".xml") else "text")
 
 
 @werkzeug
