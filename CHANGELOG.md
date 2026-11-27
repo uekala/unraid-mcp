@@ -1,5 +1,11 @@
 # Änderungen
 
+## 0.2.2
+
+- `container_aktion` funktioniert: Der Socket-Proxy bekommt eine eigene Vorlage (`deploy/haproxy.cfg.template`), die `POST`
+  nur für `start`, `stop` und `restart` zulässt. Vorher lehnte der Proxy mit `POST=0` jede Aktion mit 403 ab; `POST=1`
+  hätte auch das Anlegen von Containern erlaubt.
+
 ## 0.2.1
 
 - Geheimnisse werden jetzt auch außerhalb von JSON maskiert: in `.env`-, `.conf`- und `.yaml`-Zeilen (z. B.

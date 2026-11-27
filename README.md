@@ -21,7 +21,7 @@ Keine freie Shell. Pfade beginnen mit der Wurzel: `appdata/filen-webdav/data/opt
 | Schicht | Wirkung |
 |---|---|
 | Bearer-Token | ohne `Authorization: Bearer <MCP_TOKEN>` antwortet der Server mit 401 (offen ist nur `/gesund`) |
-| Socket-Proxy | der MCP-Server sieht den Docker-Socket nicht selbst; der Proxy erlaubt nur Container ansehen, Protokolle, Statistik, starten, stoppen, neu starten – kein Anlegen, kein `exec`, keine Images oder Volumes |
+| Socket-Proxy | der MCP-Server sieht den Docker-Socket nicht selbst; der Proxy erlaubt nur Container ansehen, Protokolle, Statistik, starten, stoppen, neu starten – kein Anlegen, kein `kill`, kein `exec`, keine Images oder Volumes (eigene `deploy/haproxy.cfg.template`, siehe unten) |
 | Schreib-Freigabe | schreiben nur in den Ordnern aus `SCHREIBEN_ERLAUBT` (Standard: `filen-webdav`) |
 | Sperre | Ordner aus `GESPERRT` (Standard: `kassensturz,stichtag`) sind weder lesbar noch sichtbar |
 | Zugangsdaten-Dateien | `rclone.conf`, `.env`, `*.key`, `*.pem`, `secrets*` u. Ä. sind nie lesbar oder schreibbar |
@@ -40,16 +40,29 @@ Mit dem Plugin **Docker Compose Manager** (Community Apps):
    ```bash
    mkdir -p /mnt/user/appdata/unraid-mcp && cd /mnt/user/appdata/unraid-mcp
    wget -q https://raw.githubusercontent.com/uekala/unraid-mcp/main/deploy/docker-compose.yml
+   wget -q https://raw.githubusercontent.com/uekala/unraid-mcp/main/deploy/haproxy.cfg.template
    echo "MCP_TOKEN=$(openssl rand -hex 32)" > .env && chmod 600 .env
    cat .env      # Token für den Connector notieren
    ```
 
 2. *Docker → Compose → Add New Stack*, Name `unraid-mcp`, als Ordner `/mnt/user/appdata/unraid-mcp` wählen
    (oder im Terminal `docker compose up -d` in diesem Ordner).
-3. Prüfen: `curl http://localhost:8765/gesund` → `ok 0.2.0`
+3. Prüfen: `curl http://localhost:8765/gesund` → `ok` und die Version
 
 Weitere Ordner zum Schreiben freigeben: `SCHREIBEN_ERLAUBT` in der Compose-Datei ergänzen (kommagetrennt, z. B.
 `filen-webdav,ladecockpit`) und den Stack neu starten.
+
+### Warum eine eigene Proxy-Vorlage
+
+`tecnativa/docker-socket-proxy` prüft `POST` vor allen Freigaben: Mit `POST=0` scheitern auch `start`, `stop` und
+`restart` mit 403, obwohl `ALLOW_START`, `ALLOW_STOP` und `ALLOW_RESTARTS` gesetzt sind. Mit `POST=1` wäre dagegen
+zusammen mit `CONTAINERS=1` auch `containers/create` offen – damit ließe sich ein Container mit Zugriff auf den Host
+anlegen. `deploy/haproxy.cfg.template` ist die Vorlage des Proxys mit genau einer geänderten Zeile: lesen wie bisher,
+`POST` nur auf `/containers/<name>/start`, `/stop` und `/restart`. `kill`, `create`, `exec`, `update` und `DELETE`
+bleiben gesperrt.
+
+Ohne Compose (Container über eine Unraid-Vorlage): Datei nach `/mnt/user/appdata/unraid-mcp/haproxy.cfg.template` legen
+und im Proxy-Container als Pfad einbinden – Container-Pfad `/usr/local/etc/haproxy/haproxy.cfg.template`, nur lesen.
 
 ## Von außen erreichbar machen (Tailscale Funnel)
 

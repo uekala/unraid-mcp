@@ -2,6 +2,8 @@
 # Der MCP-Server sieht den Docker-Socket nicht selbst, sondern nur den Proxy. Der lässt nur zu:
 # Container auflisten und ansehen, Protokolle und Statistik lesen, starten, stoppen, neu starten.
 # Anlegen, Löschen, exec, Images, Volumes und Netzwerke sind gesperrt.
+# Die Freigabe von start/stop/restart steckt in haproxy.cfg.template (liegt neben dieser Datei): Die Vorlage des
+# Proxys sperrt mit POST=0 sonst jedes POST, mit POST=1 wäre auch containers/create offen.
 
 services:
   docker-proxy:
@@ -17,6 +19,7 @@ services:
       POST: 0
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./haproxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
     networks: [intern]
     # kein Port nach außen
 
