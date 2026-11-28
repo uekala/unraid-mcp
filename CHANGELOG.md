@@ -1,5 +1,10 @@
 # Änderungen
 
+## 0.3.0
+
+- Neue Werkzeuge für Jobradar: `jobradar_lesen`, `jobradar_stellen_anlegen` (mit Dublettenprüfung) und
+  `jobradar_lauf_eintragen`. Adresse und Anmeldung ermittelt der Server selbst; das Passwort verlässt ihn nie.
+
 ## 0.2.2
 
 - `container_aktion` funktioniert: Der Socket-Proxy bekommt eine eigene Vorlage (`deploy/haproxy.cfg.template`), die `POST`

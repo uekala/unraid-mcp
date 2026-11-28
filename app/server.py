@@ -13,6 +13,12 @@ import re
 import shutil
 import tempfile
 import time
+import base64
+import socket
+import struct
+import urllib.error
+import urllib.parse
+import urllib.request
 
 import docker
 import uvicorn
@@ -172,6 +178,7 @@ mcp = MCPServer(
         "Zugriff auf den Unraid-Server: Docker-Container auflisten, Protokolle lesen, starten/stoppen/neu starten, "
         "Einstellungen ansehen und Dateien unter appdata lesen; ändern nur in den freigegebenen Ordnern, gesperrte Ordner und "
         "Dateien mit Zugangsdaten (rclone.conf, .env, Schlüssel) sind nicht erreichbar (vorlagen = Unraid-Vorlagen, nur lesen). "
+        "Jobradar: Profil, Regeln und Stellen lesen, neue Stellen anlegen und Suchläufe vermerken (jobradar_*). "
         "Geheimnisse (Passwörter, Tokens, Schlüssel) erscheinen als *** – in JSON, in .env/.conf-Zeilen, in Vorlagen und in "
         "Protokollen; beim Schreiben einer JSON-Datei bleibt ein *** der alte Wert, andere Dateien mit *** werden nicht "
         "geschrieben. Vor dem Schreiben wird eine .bak-Kopie angelegt. Nach Änderungen an Einstellungen den Container "
@@ -399,6 +406,164 @@ def datei_schreiben(pfad: str, inhalt: str) -> str:
         os.chmod(tmp, 0o644)
     os.replace(tmp, ziel)
     return f"geschrieben: {pfad} ({len(inhalt.encode())} B)" + (f", Kopie: {os.path.basename(sicherung)}" if sicherung else "")
+
+
+# ---------- Jobradar (eigener Dienst im Heimnetz) ----------
+# Die Werkzeuge rufen die REST-API des Jobradar-Containers auf. Adresse und Anmeldung bleiben im Server:
+# Die Adresse ergibt sich aus dem veröffentlichten Port des Containers und dem Gateway des eigenen Netzes,
+# Benutzer und Passwort stehen in der Env-Datei des Containers (nur intern gelesen, nie ausgegeben).
+JOBRADAR_CONTAINER = os.environ.get("JOBRADAR_CONTAINER", "jobradar")
+JOBRADAR_URL = os.environ.get("JOBRADAR_URL", "").rstrip("/")
+JOBRADAR_ENV = os.environ.get("JOBRADAR_ENV", "/appdata/jobradar/jobradar.env")
+STELLEN_MAX = 30
+STELLEN_FELDER = {"title", "company", "location", "url", "source", "description", "salary_min", "salary_max",
+                  "remote_type", "score", "published_at"}
+
+
+def _gateway():
+    with open("/proc/net/route") as f:
+        for zeile in f.readlines()[1:]:
+            teile = zeile.split()
+            if len(teile) > 2 and teile[1] == "00000000":
+                return socket.inet_ntoa(struct.pack("<L", int(teile[2], 16)))
+    raise Fehler("Kein Gateway gefunden; JOBRADAR_URL setzen")
+
+
+def _jobradar_basis():
+    if JOBRADAR_URL:
+        return JOBRADAR_URL
+    ports = (container(JOBRADAR_CONTAINER).attrs.get("NetworkSettings", {}).get("Ports") or {}).get("8099/tcp") or []
+    if not ports or not ports[0].get("HostPort"):
+        raise Fehler("Jobradar veröffentlicht keinen Port; JOBRADAR_URL setzen")
+    return f"http://{_gateway()}:{ports[0]['HostPort']}"
+
+
+def _jobradar_anmeldung():
+    werte = {}
+    try:
+        with open(JOBRADAR_ENV) as f:
+            for zeile in f:
+                k, sep, v = zeile.strip().partition("=")
+                if sep and not k.startswith("#"):
+                    werte[k.strip()] = v.strip().strip("\"'")
+    except OSError:
+        pass
+    passwort = werte.get("JOBRADAR_WEB_PASSWORD", "")
+    if not passwort:
+        return None
+    benutzer = werte.get("JOBRADAR_WEB_USER") or "jobradar"
+    return "Basic " + base64.b64encode(f"{benutzer}:{passwort}".encode()).decode()
+
+
+def jobradar_api(methode, pfad, daten=None, abfrage=None):
+    url = _jobradar_basis() + pfad
+    if abfrage:
+        url += "?" + urllib.parse.urlencode({k: v for k, v in abfrage.items() if v not in (None, "")})
+    kopf = {"Accept": "application/json"}
+    anmeldung = _jobradar_anmeldung()
+    if anmeldung:
+        kopf["Authorization"] = anmeldung
+    rumpf = None
+    if daten is not None:
+        rumpf = json.dumps(daten).encode()
+        kopf["Content-Type"] = "application/json"
+    anfrage = urllib.request.Request(url, data=rumpf, method=methode, headers=kopf)
+    try:
+        with urllib.request.urlopen(anfrage, timeout=30) as antwort:
+            text = antwort.read().decode()
+    except urllib.error.HTTPError as e:
+        raise Fehler(f"Jobradar antwortet {e.code} auf {methode} {pfad}: {e.read().decode(errors='replace')[:500]}") from e
+    except (urllib.error.URLError, OSError) as e:
+        raise Fehler(f"Jobradar nicht erreichbar ({methode} {pfad}): {e}") from e
+    return json.loads(text) if text else None
+
+
+def _alle_stellen():
+    stellen, offset = [], 0
+    while True:
+        seite = jobradar_api("GET", "/api/jobs", abfrage={"limit": 200, "offset": offset})
+        stellen += seite["items"]
+        offset += len(seite["items"])
+        if not seite["items"] or offset >= seite["total"]:
+            return stellen
+
+
+def _schluessel(titel, firma):
+    norm = lambda t: re.sub(r"\s+", " ", re.sub(r"\((m|w|d|f|x|/|\s)+\)", "", (t or "").lower())).strip()
+    return (norm(titel), norm(firma))
+
+
+@werkzeug
+def jobradar_lesen(bereich: str, status: str = "", suche: str = "") -> str:
+    """Jobradar lesen. bereich: profil, regeln, quellen, stellen, laeufe oder uebersicht.
+    Bei stellen alle bekannten Stellen (id, Titel, Arbeitgeber, Ort, URL, Quelle, Punkte, Status, Notiz, erstmals gesehen),
+    optional gefiltert nach status (neu, merken, beworben, absage, verworfen …) und suche (Titel, Arbeitgeber, Ort)."""
+    pfade = {"profil": "/api/profile", "regeln": "/api/rules", "quellen": "/api/sources", "laeufe": "/api/runs",
+             "uebersicht": "/api/overview"}
+    if bereich == "stellen":
+        if status or suche:
+            stellen, offset = [], 0
+            while True:
+                seite = jobradar_api("GET", "/api/jobs", abfrage={"limit": 200, "offset": offset, "status": status, "q": suche})
+                stellen += seite["items"]
+                offset += len(seite["items"])
+                if not seite["items"] or offset >= seite["total"]:
+                    break
+        else:
+            stellen = _alle_stellen()
+        felder = ("id", "title", "company", "location", "url", "source", "score", "status", "notes", "first_seen_at")
+        return kuerzen(json.dumps({"anzahl": len(stellen), "stellen": [{k: s.get(k) for k in felder} for s in stellen]},
+                                  ensure_ascii=False))
+    if bereich not in pfade:
+        raise Fehler("bereich: profil, regeln, quellen, stellen, laeufe oder uebersicht")
+    return kuerzen(json.dumps(jobradar_api("GET", pfade[bereich]), ensure_ascii=False, indent=1))
+
+
+@werkzeug
+def jobradar_stellen_anlegen(stellen: list[dict]) -> str:
+    """Neue Stellen im Jobradar speichern (höchstens 30 je Aufruf). Felder je Stelle: title (Pflicht), company, location,
+    url, source, description, salary_min, salary_max (Euro brutto pro Jahr), remote_type, score (0–100), published_at.
+    Stellen mit bekannter URL oder gleichem Titel beim gleichen Arbeitgeber werden übersprungen (Dublette)."""
+    if not isinstance(stellen, list) or not stellen:
+        raise Fehler("stellen: Liste mit mindestens einer Stelle")
+    if len(stellen) > STELLEN_MAX:
+        raise Fehler(f"höchstens {STELLEN_MAX} Stellen je Aufruf")
+    vorhanden = _alle_stellen()
+    urls = {s["url"].strip() for s in vorhanden if s.get("url")}
+    paare = {_schluessel(s.get("title"), s.get("company")) for s in vorhanden}
+    angelegt, dubletten, fehler = [], [], []
+    for stelle in stellen:
+        fremd = set(stelle) - STELLEN_FELDER
+        if fremd or not str(stelle.get("title", "")).strip():
+            fehler.append(f"{stelle.get('title', '?')}: " + (f"unbekannte Felder {sorted(fremd)}" if fremd else "title fehlt"))
+            continue
+        url = (stelle.get("url") or "").strip()
+        paar = _schluessel(stelle.get("title"), stelle.get("company"))
+        if (url and url in urls) or paar in paare:
+            dubletten.append(stelle["title"])
+            continue
+        try:
+            neu = jobradar_api("POST", "/api/jobs", daten=stelle)
+        except Fehler as e:
+            fehler.append(f"{stelle['title']}: {e}")
+            continue
+        angelegt.append({"id": neu["id"], "title": neu["title"], "score": neu.get("score")})
+        if url:
+            urls.add(url)
+        paare.add(paar)
+    return json.dumps({"angelegt": angelegt, "dubletten": dubletten, "fehler": fehler}, ensure_ascii=False, indent=1)
+
+
+@werkzeug
+def jobradar_lauf_eintragen(status: str, gefunden: int = 0, neu: int = 0, hinweis: str = "") -> str:
+    """Einen abgeschlossenen Suchlauf im Jobradar vermerken. status: success, partial oder failed;
+    gefunden = Treffer vor dem Filtern, neu = gespeicherte Stellen, hinweis = kurzer Text (Quellen, Ausfälle)."""
+    if status not in ("success", "partial", "failed"):
+        raise Fehler("status: success, partial oder failed")
+    lauf = jobradar_api("POST", "/api/runs", daten={})
+    fertig = jobradar_api("POST", f"/api/runs/{lauf['id']}/finish", daten={
+        "status": status, "jobs_found": max(0, gefunden), "jobs_new": max(0, neu), "error_summary": hinweis[:2000] or None})
+    return json.dumps(fertig, ensure_ascii=False)
 
 
 def mit_token(app):

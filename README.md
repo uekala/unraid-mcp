@@ -13,6 +13,9 @@ eigener Connector in Claude. Läuft als Docker-Container auf Unraid.
 | `system_status` | Laufzeit, Last, RAM, Docker-Übersicht, Platz |
 | `ordner_inhalt` | Dateien unter `appdata` bzw. `vorlagen` |
 | `datei_lesen` / `datei_schreiben` | Textdateien unter `appdata` (schreiben nur in freigegebenen Ordnern) und `vorlagen` (nur lesen) |
+| `jobradar_lesen` | Profil, Regeln, Quellen, Stellen, Suchläufe oder Übersicht eines [Jobradar](https://github.com/uekala/jobradar)-Containers |
+| `jobradar_stellen_anlegen` | bis zu 30 neue Stellen speichern; bekannte URL oder gleicher Titel beim gleichen Arbeitgeber gilt als Dublette |
+| `jobradar_lauf_eintragen` | abgeschlossenen Suchlauf mit Treffern, neuen Stellen und Hinweis vermerken |
 
 Keine freie Shell. Pfade beginnen mit der Wurzel: `appdata/filen-webdav/data/options.json`.
 
@@ -85,6 +88,15 @@ Funnel muss in den Tailscale-Zugriffsregeln (`nodeAttrs`, Attribut `funnel`) fü
 | URL | `https://<host>.<tailnet>.ts.net/mcp` |
 | Request header | `Authorization` = `Bearer <Token>` |
 
+## Jobradar
+
+Die Jobradar-Werkzeuge sprechen die REST-API eines Jobradar-Containers auf demselben Server an. Ohne weitere
+Einstellung findet der Server ihn selbst: Container `jobradar`, sein veröffentlichter Port für `8099/tcp`, erreicht
+über das Gateway des eigenen Docker-Netzes. Benutzer und Passwort liest er aus der Env-Datei des Containers
+(`/appdata/jobradar/jobradar.env`, `JOBRADAR_WEB_USER` und `JOBRADAR_WEB_PASSWORD`). Sie werden nur intern für die
+Anmeldung benutzt und nie ausgegeben. Wer den MCP-Token hat, kann damit Stellen lesen und anlegen, aber keine
+löschen und keine Einstellungen ändern.
+
 ## Umgebungsvariablen
 
 | Variable | Bedeutung | Standard |
@@ -96,3 +108,6 @@ Funnel muss in den Tailscale-Zugriffsregeln (`nodeAttrs`, Attribut `funnel`) fü
 | `GESPERRT` | Ordner unter appdata, die nicht erreichbar sind | `kassensturz,stichtag` |
 | `MAX_DATEI_KB` | größte Datei zum Lesen/Schreiben | `1024` |
 | `APPDATA_PFAD` / `VORLAGEN_PFAD` | Einhängepunkte im Container | `/appdata` / `/vorlagen` |
+| `JOBRADAR_CONTAINER` | Name des Jobradar-Containers | `jobradar` |
+| `JOBRADAR_URL` | feste Adresse statt der automatischen, z. B. `http://192.168.1.10:8096` | leer |
+| `JOBRADAR_ENV` | Env-Datei mit der Anmeldung | `/appdata/jobradar/jobradar.env` |
