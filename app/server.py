@@ -4,6 +4,8 @@ Zugriff nur mit Bearer-Token (MCP_TOKEN). Keine freie Shell: Container steuern, 
 Dateien unter den freigegebenen Wurzeln lesen und schreiben.
 """
 
+import base64
+import contextlib
 import datetime as dt
 import functools
 import hmac
@@ -11,11 +13,10 @@ import json
 import os
 import re
 import shutil
-import tempfile
-import time
-import base64
 import socket
 import struct
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,7 +27,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
 
-VERSION = open(os.path.join(os.path.dirname(__file__), "VERSION")).read().strip()
+with open(os.path.join(os.path.dirname(__file__), "VERSION")) as _f:
+    VERSION = _f.read().strip()
 TOKEN = os.environ.get("MCP_TOKEN", "")
 PORT = int(os.environ.get("PORT", "8765"))
 MAX_LESEN = int(os.environ.get("MAX_DATEI_KB", "1024")) * 1024
@@ -66,6 +68,11 @@ class Fehler(ToolError):
     """Erwarteter Fehler – der Text erreicht den Aufrufer."""
 
 
+def _lesen(pfad):
+    with open(pfad) as f:
+        return f.read()
+
+
 def dk():
     global _docker
     if _docker is None:
@@ -84,7 +91,7 @@ def container(name):
         return dk().containers.get(name)
     except docker.errors.NotFound:
         namen = sorted(c.name for c in dk().containers.list(all=True))
-        raise Fehler(f"Container „{name}“ gibt es nicht. Vorhanden: {', '.join(namen)}")
+        raise Fehler(f"Container „{name}“ gibt es nicht. Vorhanden: {', '.join(namen)}") from None
 
 
 def maskiere_env(env):
@@ -295,10 +302,10 @@ def system_status() -> str:
     """Laufzeit, Last, Arbeitsspeicher, Docker-Übersicht und Platz der Freigaben."""
     aus = []
     try:
-        sek = float(open("/proc/uptime").read().split()[0])
+        sek = float(_lesen("/proc/uptime").split()[0])
         aus.append(f"Laufzeit: {dt.timedelta(seconds=int(sek))}")
-        aus.append("Last (1/5/15 min): " + " ".join(open("/proc/loadavg").read().split()[:3]))
-        mem = {z.split(":")[0]: int(z.split()[1]) for z in open("/proc/meminfo") if z.split(":")[0] in ("MemTotal", "MemAvailable")}
+        aus.append("Last (1/5/15 min): " + " ".join(_lesen("/proc/loadavg").split()[:3]))
+        mem = {z.split(":")[0]: int(z.split()[1]) for z in _lesen("/proc/meminfo").splitlines() if z.split(":")[0] in ("MemTotal", "MemAvailable")}
         aus.append(f"RAM: {(mem['MemTotal'] - mem['MemAvailable']) / 2**20:.1f} von {mem['MemTotal'] / 2**20:.1f} GiB belegt")
     except Exception as e:
         aus.append(f"/proc nicht lesbar: {e}")
@@ -355,7 +362,8 @@ def datei_lesen(pfad: str) -> str:
         raise Fehler("Keine Datei")
     if os.path.getsize(ziel) > MAX_LESEN:
         raise Fehler(f"Datei größer als {MAX_LESEN // 1024} KB")
-    text = open(ziel, "rb").read().decode("utf-8", "replace")
+    with open(ziel, "rb") as f:
+        text = f.read().decode("utf-8", "replace")
     if ziel.lower().endswith(".json"):
         try:
             return maskiere_text(json.dumps(maskiere_json(json.loads(text)), indent=2, ensure_ascii=False), "frei")
@@ -378,12 +386,10 @@ def datei_schreiben(pfad: str, inhalt: str) -> str:
         try:
             neu = json.loads(inhalt)
         except ValueError as e:
-            raise Fehler(f"Ungültiges JSON: {e}")
+            raise Fehler(f"Ungültiges JSON: {e}") from e
         if vorhanden:
-            try:
-                neu = masken_zurueck(neu, json.load(open(ziel)))
-            except ValueError:
-                pass
+            with contextlib.suppress(ValueError):
+                neu = masken_zurueck(neu, json.loads(_lesen(ziel)))
         inhalt = json.dumps(neu, indent=2, ensure_ascii=False) + "\n"
     elif MASKE in inhalt and vorhanden:
         raise Fehler("Inhalt enthält *** – nur in JSON-Dateien werden maskierte Werte übernommen")
@@ -398,10 +404,8 @@ def datei_schreiben(pfad: str, inhalt: str) -> str:
         f.write(inhalt)
     if vorhanden:
         os.chmod(tmp, st.st_mode & 0o7777)
-        try:
+        with contextlib.suppress(OSError):
             os.chown(tmp, st.st_uid, st.st_gid)
-        except OSError:
-            pass
     else:
         os.chmod(tmp, 0o644)
     os.replace(tmp, ziel)
@@ -489,7 +493,8 @@ def _alle_stellen():
 
 
 def _schluessel(titel, firma):
-    norm = lambda t: re.sub(r"\s+", " ", re.sub(r"\((m|w|d|f|x|/|\s)+\)", "", (t or "").lower())).strip()
+    def norm(t):
+        return re.sub(r"\s+", " ", re.sub(r"\((m|w|d|f|x|/|\s)+\)", "", (t or "").lower())).strip()
     return (norm(titel), norm(firma))
 
 
